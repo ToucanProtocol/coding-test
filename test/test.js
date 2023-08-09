@@ -15,9 +15,7 @@ describe("Arbitrager", function() {
       weth,
       token,
       arbitrager,
-      uniswapFactory,
       uniswapRouter,
-      sushiFactory,
       sushiRouter;
 
   async function deployWETH(depositAmount) {
@@ -29,7 +27,7 @@ describe("Arbitrager", function() {
     token = await waffle.deployContract(owner, ERC20, [mintAmount])
   }
 
-  async function deployDEX(liquidityAmount) {
+  async function deployDEX(liquidityAmount, wethTokenRatio = 1) {
     const factory = await waffle.deployContract(owner, UniswapV2Factory, [owner.address])
     await factory.deployed()
     const router = await waffle.deployContract(owner, UniswapV2Router, [factory.address, weth.address])
@@ -40,28 +38,73 @@ describe("Arbitrager", function() {
 
     // Add liquidity
     await weth.connect(owner).transfer(pairAddress, liquidityAmount)
-    await token.connect(owner).transfer(pairAddress, liquidityAmount)
+    await token.connect(owner).transfer(pairAddress, liquidityAmount.mul(wethTokenRatio))
     await pair.connect(owner).mint(owner.address)
     return { factory, router }
   }
 
-  before("Deploy contracts", async function() {
+  beforeEach("Deploy contracts", async function() {
     const accounts = await getSigners();
     owner = accounts[0];
     trader = accounts[1];
     // Deploy tokens
     await deployWETH(WeiPerEther.mul(300));
-    await deployToken(WeiPerEther.mul(300));
+    await deployToken(WeiPerEther.mul(30000000));
     // Deploy exchanges
-    const uniswap = await deployDEX(WeiPerEther.mul(100));
-    const sushi = await deployDEX(WeiPerEther.mul(100));
-    uniswapFactory = uniswap.factory;
+    const uniswap = await deployDEX(WeiPerEther.mul(100), 1900);
+    const sushi = await deployDEX(WeiPerEther.mul(100), 1800);
     uniswapRouter = uniswap.router;
-    sushiFactory = sushi.factory;
     sushiRouter = sushi.router;
     // Deploy arbitrager
     const Arbitrager = await ethers.getContractFactory("Arbitrager");
     arbitrager = await Arbitrager.deploy(weth.address);
     await arbitrager.deployed();
+  });
+
+  it("should fail if no ETH is provided", async function() {
+    await expect(
+      arbitrager.connect(trader).arbitrage(
+      token.address,
+      uniswapRouter.address, 
+      sushiRouter.address
+    )).to.be.revertedWith("No value");
+  });
+
+  it("should perform profitable arbitrage", async function() {
+    // Pre-conditions
+    const capitalAtRisk = ethers.utils.parseUnits("1", "ether");
+    const traderBalanceBefore = await ethers.provider.getBalance(trader.address);
+
+    // Perform arbitrage
+    await arbitrager.connect(trader).arbitrage(
+      token.address,
+      uniswapRouter.address, 
+      sushiRouter.address,
+      { value: capitalAtRisk }
+    );
+
+    // Post-conditions
+    const traderBalanceAfter = await ethers.provider.getBalance(trader.address);
+    expect(traderBalanceAfter).to.be.gt(traderBalanceBefore);
+  });
+
+  it("should fail to perform unprofitable arbitrage", async function() {
+    // Pre-conditions; arbitrage is captured already
+    const capitalAtRisk = ethers.utils.parseUnits("1", "ether");
+    await arbitrager.connect(owner).arbitrage(
+      token.address,
+      uniswapRouter.address, 
+      sushiRouter.address,
+      { value: capitalAtRisk }
+    );
+
+    // Follow-up arbitrage should fail
+    await expect(
+      arbitrager.connect(trader).arbitrage(
+      token.address,
+      uniswapRouter.address, 
+      sushiRouter.address,
+      { value: capitalAtRisk }
+    )).to.be.revertedWith("Not profitable");
   });
 });
